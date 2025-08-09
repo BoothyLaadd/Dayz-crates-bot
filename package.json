@@ -1,0 +1,18 @@
+{
+  "name": "dayz-crates-bot",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "discord.js": "^14.15.3",
+    "lowdb": "^6.0.1",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
+  }
+}
