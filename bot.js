@@ -1,8 +1,13 @@
 // bot.js — DayZ Crates Bot (Replit-ready, no native deps)
-// Features: role grants, dropdown removal + clear-all (with confirm),
-// admin add (single & bulk), channel lock, expanded kits, currency tiers,
-// WEIGHTED specials (Truck/Weapons Car/Storage Car common; Humvee/Build Spawn ultra-rare),
-// category-colored embeds + SPECIAL title styling, uptime server import.
+// Features:
+// - /give-crate, /give-crate-role (admin)
+// - /open-crate with channel lock + SPECIAL styling
+// - 10% EMPTY crate chance with DayZ-flavored messages (no DB entry)
+// - /my-rewards, /member-rewards (admin)
+// - /admin-remove-reward (by ID), /remove-reward-member (dropdown) + Clear All (confirm)
+// - /admin-add-reward (single), /admin-add-rewards (bulk string)
+// - Weighted specials + currency tiers + category colors
+// - Tiny health server (via ./server.js) for uptime pingers
 
 import 'dotenv/config'
 import './server.js'
@@ -26,10 +31,11 @@ import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 
+// ---- ENV ----
 const TOKEN = process.env.BOT_TOKEN
 const CLIENT_ID = process.env.CLIENT_ID
 const GUILD_ID = process.env.GUILD_ID
-const OPEN_CH = process.env.OPEN_CRATE_CHANNEL_ID || '1394016674004467772'
+const OPEN_CH = process.env.OPEN_CRATE_CHANNEL_ID || '1394016674004467772' // optional channel lock
 
 if (!TOKEN || !CLIENT_ID) {
   console.error('Missing BOT_TOKEN or CLIENT_ID in environment variables')
@@ -37,20 +43,34 @@ if (!TOKEN || !CLIENT_ID) {
 }
 
 // ---- Loot settings ----
-const SPECIAL_CHANCE = 0.05
-// Weighted within specials (adds to 100% of the 5% bucket)
+const EMPTY_CHANCE = 0.10
+const EMPTY_FLAVOR = [
+  "You searched a crate near **Elektro** and found nothing but dust and old paper.",
+  "Under a broken pier in **Cherno**, the crate was empty—just rust flakes and a dead spider.",
+  "In the shadow of **Berezhki**’s lighthouse, you cracked it open… empty.",
+  "Behind a collapsed barn near **Gorka**, the crate had been looted long ago.",
+  "By the tracks outside **Krasnostav**, only splinters and old nails remained.",
+  "In a flooded cellar near **Novodmitrovsk**, the crate had rotted to mush.",
+  "Someone beat you to it south of **Vybor**—just footprints and scraps.",
+  "Near the **NWAF** fence line, you pry it open… stale air and disappointment.",
+  "Buried in scrub west of **Zelenogorsk**, it’s already been picked clean.",
+  "Under the radio mast by **Green Mountain**, you find… nothing."
+]
+
+const SPECIAL_CHANCE = 0.05 // chance to hit the special table
+// Weighted within specials (higher weight = more common within the 5%)
 const SPECIAL_REWARDS = [
   { kind: 'item', name: "Builder's Truck", weight: 30, description: "Fully equipped mobile base-building vehicle." },
-  { kind: 'item', name: 'Weapons Car', weight: 30, description: "A vehicle fully stocked with weapons." },
-  { kind: 'item', name: 'Storage Car', weight: 30, description: "A vehicle loaded with tents, barrels, and storage." },
-  { kind: 'item', name: 'Humvee', weight: 5, description: "Military-grade armored transport vehicle." },
+  { kind: 'item', name: 'Weapons Car',   weight: 30, description: "A vehicle fully stocked with weapons." },
+  { kind: 'item', name: 'Storage Car',   weight: 30, description: "A vehicle loaded with tents, barrels, and storage." },
+  { kind: 'item', name: 'Humvee',        weight: 5,  description: "Military-grade armored transport vehicle." },
   { kind: 'item', name: '24 Hour Build Spawn', weight: 5, description: "Special permit to place unlimited build items for 24 hours." },
 ]
 
 const CATEGORY_WEIGHTS = [
   { cat: 'currency', weight: 40 },
-  { cat: 'weapon', weight: 25 },
-  { cat: 'kit', weight: 30 },
+  { cat: 'weapon',  weight: 25 },
+  { cat: 'kit',     weight: 30 },
 ]
 
 const CURRENCY_TIERS = [
@@ -61,23 +81,22 @@ const CURRENCY_TIERS = [
 ]
 
 const WEAPONS = [
-  'M4A1', 'LAR (FAL)', 'SVD', 'VSS Vintorez', 'AK-101', 'AK-74',
-  'M70 Tundra', 'Mosin 91/30', 'M16A2', 'AS VAL'
+  'M4A1','LAR (FAL)','SVD','VSS Vintorez','AK-101','AK-74',
+  'M70 Tundra','Mosin 91/30','M16A2','AS VAL'
 ]
 
 const KITS = [
-  { name: 'Medical Kit', description: "Bandages, saline, morphine, and other essential medical supplies." },
-  { name: 'Food Kit', description: "Canned goods, cooking pot, and utensils for survival." },
-  { name: 'Hunter Kit', description: "Scoped rifle, hunting knife, and ammo." },
-  { name: 'Camo Kit', description: "Ghillie suit and camo clothing for stealth." },
-  { name: 'Clothing Kit', description: "Warm clothing and boots for harsh conditions." },
-  { name: 'Repair Kit', description: "Weapon cleaning kit, sewing kit, duct tape." },
+  { name: 'Medical Kit',        description: "Bandages, saline, morphine, and other essential medical supplies." },
+  { name: 'Food Kit',           description: "Canned goods, cooking pot, and utensils for survival." },
+  { name: 'Hunter Kit',         description: "Scoped rifle, hunting knife, and ammo." },
+  { name: 'Camo Kit',           description: "Ghillie suit and camo clothing for stealth." },
+  { name: 'Clothing Kit',       description: "Warm clothing and boots for harsh conditions." },
+  { name: 'Repair Kit',         description: "Weapon cleaning kit, sewing kit, duct tape." },
   { name: 'Vehicle Repair Kit', description: "Spare parts, wrench, and repair tools." },
-  { name: 'Tool Kit', description: "Axe, shovel, saw, and other basic tools." },
-  { name: 'Ammo Kit', description: "Mixed ammo types for various weapons." },
-  { name: 'Survival Kit', description: "Matches, canteen, rope, tarp." },
+  { name: 'Tool Kit',           description: "Axe, shovel, saw, and other basic tools." },
+  { name: 'Ammo Kit',           description: "Mixed ammo types for various weapons." },
+  { name: 'Survival Kit',       description: "Matches, canteen, rope, tarp." },
 ]
-
 
 // ---- Helpers ----
 function pickWeighted(bag) {
@@ -97,13 +116,24 @@ function rollCurrencyAmount() {
 }
 
 function pickReward() {
+  // 10%: EMPTY crate with flavor message (no DB entry)
+  if (Math.random() < EMPTY_CHANCE) {
+    const msg = EMPTY_FLAVOR[Math.floor(Math.random() * EMPTY_FLAVOR.length)]
+    return { kind: 'empty', message: msg }
+  }
+
+  // Specials: 5%
   if (Math.random() < SPECIAL_CHANCE) {
     const s = pickWeighted(SPECIAL_REWARDS)
     return { ...s, amount: 1, special: true }
   }
+
+  // Regular categories
   const cat = pickWeighted(CATEGORY_WEIGHTS).cat
   if (cat === 'currency') return rollCurrencyAmount()
-  if (cat === 'weapon') return { kind: 'item', name: WEAPONS[Math.floor(Math.random() * WEAPONS.length)], amount: 1 }
+  if (cat === 'weapon') {
+    return { kind: 'item', name: WEAPONS[Math.floor(Math.random() * WEAPONS.length)], amount: 1 }
+  }
   const kit = KITS[Math.floor(Math.random() * KITS.length)]
   return { kind: 'item', name: kit.name, description: kit.description, amount: 1 }
 }
@@ -121,10 +151,21 @@ function ensureUser(userId) {
 function addCrates(userId, qty) { ensureUser(userId); db.data.users[userId].crates += qty; db.write() }
 function getCrates(userId) { ensureUser(userId); return db.data.users[userId].crates }
 function decCrate(userId) { const c = getCrates(userId); if (c > 0) { db.data.users[userId].crates = c - 1; db.write(); return true } return false }
-function addRewardRow(userId, reward) { const id = randomUUID(); db.data.rewards.unshift({ id, user_id: userId, ...reward, status: 'active', created_at: new Date().toISOString() }); db.write(); return id }
+function addRewardRow(userId, reward) {
+  const id = randomUUID()
+  db.data.rewards.unshift({ id, user_id: userId, ...reward, status: 'active', created_at: new Date().toISOString() })
+  db.write()
+  return id
+}
 function listRewards(userId, limit, offset) { return db.data.rewards.filter(r => r.user_id === userId && r.status === 'active').slice(offset, offset + limit) }
 function countRewards(userId) { return db.data.rewards.filter(r => r.user_id === userId && r.status === 'active').length }
-function removeReward(id) { const r = db.data.rewards.find(x => x.id === id && x.status === 'active'); if (!r) return false; r.status = 'removed'; db.write(); return true }
+function removeReward(id) {
+  const r = db.data.rewards.find(x => x.id === id && x.status === 'active')
+  if (!r) return false
+  r.status = 'removed'
+  db.write()
+  return true
+}
 function clearRewards(userId) {
   const rows = db.data.rewards.filter(r => r.user_id === userId && r.status === 'active')
   if (!rows.length) return 0
@@ -140,15 +181,17 @@ function isAdmin(member) {
 }
 
 function visualsFor(reward) {
-  // Category-based colors
   const COLORS = {
     special: 0xf1c40f, // gold
     currency: 0x2ecc71, // green
     weapon: 0xe74c3c, // red
     kit: 0x3498db, // blue
     misc: 0x9b59b6, // purple
+    empty: 0x7f8c8d, // dusty gray
+    crate: 0x00b894
   }
-  if (!reward) return { color: 0x00b894 }
+  if (!reward) return { color: COLORS.crate }
+  if (reward.kind === 'empty') return { color: COLORS.empty }
   if (reward.special) return { color: COLORS.special }
   if (reward.kind === 'currency') return { color: COLORS.currency }
   const isWeapon = WEAPONS.includes(reward.name)
@@ -174,7 +217,7 @@ const commands = [
   },
   {
     name: 'member-rewards',
-    description: 'View a member\'s active rewards (admin)',
+    description: "View a member's active rewards (admin)",
     default_member_permissions: PermissionFlagsBits.ManageGuild.toString(),
     options: [
       { name: 'member', description: 'Target member', type: 6, required: true },
@@ -233,11 +276,12 @@ const commands = [
   }
 ]
 
-// Register commands
+// ---- Register commands ----
 const rest = new REST({ version: '10' }).setToken(TOKEN)
 if (GUILD_ID) await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands })
 else await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands })
 
+// ---- Client ----
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers] })
 client.once('ready', () => console.log('Logged in as', client.user.tag))
 
@@ -246,6 +290,7 @@ client.on('interactionCreate', async itx => {
     if (itx.isChatInputCommand()) {
       ensureUser(itx.user.id)
 
+      // ---- give-crate-role (admin) ----
       if (itx.commandName === 'give-crate-role') {
         const execMember = await itx.guild.members.fetch(itx.user.id)
         if (!isAdmin(execMember)) return itx.reply({ content: 'You lack permission.', ephemeral: true })
@@ -259,19 +304,11 @@ client.on('interactionCreate', async itx => {
         const targets = allMembers.filter(m => !m.user.bot && m.roles.cache.has(role.id))
 
         const total = targets.size
-        if (!total) {
-          return itx.editReply({ content: `No human members found with role ${role}.` })
-        }
-        if (total > 1000) {
-          return itx.editReply({ content: `Role has ${total} members — too large for a single grant. Please narrow it down.` })
-        }
+        if (!total) return itx.editReply({ content: `No human members found with role ${role}.` })
+        if (total > 1000) return itx.editReply({ content: `Role has ${total} members — too large for a single grant. Please narrow it down.` })
 
         let granted = 0
-        for (const m of targets.values()) {
-          ensureUser(m.id)
-          addCrates(m.id, qty)
-          granted++
-        }
+        for (const m of targets.values()) { addCrates(m.id, qty); granted++ }
 
         const embed = new EmbedBuilder()
           .setTitle('🎁 Crates Granted to Role')
@@ -287,6 +324,7 @@ client.on('interactionCreate', async itx => {
         return itx.editReply({ embeds: [embed] })
       }
 
+      // ---- give-crate (admin) ----
       if (itx.commandName === 'give-crate') {
         const target = itx.options.getUser('member', true)
         const qty = itx.options.getInteger('qty', true)
@@ -296,29 +334,49 @@ client.on('interactionCreate', async itx => {
         return itx.reply({ embeds: [new EmbedBuilder()
           .setTitle('🎁 Crates Granted')
           .setDescription(`Gave **${qty}** crate(s) to ${target}.`)
-          .setColor(0x00b894)
+          .setColor(visualsFor().color)
           .setFooter({ text: `Requested by ${itx.user.username}` })
           .setTimestamp()
         ] })
       }
 
+      // ---- open-crate ----
       if (itx.commandName === 'open-crate') {
-        if (OPEN_CH && itx.channelId !== OPEN_CH) return itx.reply({ content: `❌ You can only open crates in <#${OPEN_CH}>.`, ephemeral: true })
-        const count = getCrates(itx.user.id)
-        if (count <= 0) return itx.reply('You have no crates to open.')
+        if (OPEN_CH && itx.channelId !== OPEN_CH) {
+          return itx.reply({ content: `❌ You can only open crates in <#${OPEN_CH}>.`, ephemeral: true })
+        }
+
+        const before = getCrates(itx.user.id)
+        if (before <= 0) return itx.reply('You have no crates to open.')
         if (!decCrate(itx.user.id)) return itx.reply('Error opening crate.')
 
         const loot = pickReward()
-        addRewardRow(itx.user.id, { kind: loot.kind, name: loot.name, amount: loot.amount, special: !!loot.special })
+        const cratesLeft = before - 1
+
+        // Empty crate flow (no DB row)
+        if (loot.kind === 'empty') {
+          const emptyEmbed = new EmbedBuilder()
+            .setTitle('📦 Crate Opened')
+            .setDescription(loot.message)
+            .addFields({ name: 'Crates Left', value: String(cratesLeft), inline: true })
+            .setColor(visualsFor(loot).color)
+            .setTimestamp()
+          return itx.reply({ embeds: [emptyEmbed] })
+        }
+
+        // Non-empty: store reward
+        addRewardRow(itx.user.id, {
+          kind: loot.kind,
+          name: loot.name,
+          amount: loot.amount,
+          special: !!loot.special
+        })
 
         const vis = visualsFor(loot)
         const isSpecial = !!loot.special
         const title = isSpecial ? `🎉 SPECIAL PRIZE! ${loot.name}` : '📦 Crate Opened'
 
-        const embed = new EmbedBuilder()
-          .setTitle(title)
-          .setColor(vis.color)
-          .setTimestamp()
+        const embed = new EmbedBuilder().setTitle(title).setColor(vis.color).setTimestamp()
 
         if (loot.kind === 'currency') {
           embed.addFields({ name: 'Reward', value: `💰 **${loot.amount} ${loot.name}** (${loot.currencyTier.toUpperCase()})` })
@@ -329,11 +387,11 @@ client.on('interactionCreate', async itx => {
           if (desc) embed.addFields({ name: 'Description', value: desc })
         }
 
-        embed.addFields({ name: 'Crates Left', value: String(count - 1), inline: true })
-
+        embed.addFields({ name: 'Crates Left', value: String(cratesLeft), inline: true })
         return itx.reply({ embeds: [embed] })
       }
 
+      // ---- my-rewards ----
       if (itx.commandName === 'my-rewards') {
         const page = Math.max(1, itx.options.getInteger('page') ?? 1), pageSize = 10
         const total = countRewards(itx.user.id)
@@ -349,6 +407,7 @@ client.on('interactionCreate', async itx => {
         ] })
       }
 
+      // ---- member-rewards (admin) ----
       if (itx.commandName === 'member-rewards') {
         const execMember = await itx.guild.members.fetch(itx.user.id)
         if (!isAdmin(execMember)) return itx.reply({ content: 'You lack permission.', ephemeral: true })
@@ -367,6 +426,7 @@ client.on('interactionCreate', async itx => {
         ], ephemeral: true })
       }
 
+      // ---- admin-add-rewards (bulk) ----
       if (itx.commandName === 'admin-add-rewards') {
         const execMember = await itx.guild.members.fetch(itx.user.id)
         if (!isAdmin(execMember)) return itx.reply({ content: 'You lack permission.', ephemeral: true })
@@ -389,7 +449,7 @@ client.on('interactionCreate', async itx => {
             if (parts[i].toLowerCase().startsWith('special:')) {
               special = parts[i].split(':')[1]?.toLowerCase() === 'true'
             } else if (parts[i].toLowerCase().startsWith('description:')) {
-              description = parts[i].substring(parts[i].indexOf(':')+1)
+              description = parts[i].substring(parts[i].indexOf(':') + 1)
             }
           }
           if (!kind || !name || isNaN(amount)) continue
@@ -421,6 +481,7 @@ client.on('interactionCreate', async itx => {
         return itx.reply({ embeds: [embed] })
       }
 
+      // ---- admin-add-reward (single) ----
       if (itx.commandName === 'admin-add-reward') {
         const execMember = await itx.guild.members.fetch(itx.user.id)
         if (!isAdmin(execMember)) return itx.reply({ content: 'You lack permission.', ephemeral: true })
@@ -452,6 +513,7 @@ client.on('interactionCreate', async itx => {
         ]})
       }
 
+      // ---- admin-remove-reward (by ID) ----
       if (itx.commandName === 'admin-remove-reward') {
         const member = await itx.guild.members.fetch(itx.user.id)
         if (!isAdmin(member)) return itx.reply({ content: 'You lack permission.', ephemeral: true })
@@ -467,9 +529,11 @@ client.on('interactionCreate', async itx => {
         ], ephemeral: true })
       }
 
+      // ---- remove-reward-member (dropdown + clear-all) ----
       if (itx.commandName === 'remove-reward-member') {
         const execMember = await itx.guild.members.fetch(itx.user.id)
         if (!isAdmin(execMember)) return itx.reply({ content: 'You lack permission.', ephemeral: true })
+
         const target = itx.options.getUser('member', true)
         const rewards = listRewards(target.id, 25, 0)
         if (!rewards.length) return itx.reply({ content: `${target} has no active rewards.`, ephemeral: true })
@@ -498,6 +562,7 @@ client.on('interactionCreate', async itx => {
       }
     }
 
+    // Dropdown removal
     if (itx.isStringSelectMenu() && itx.customId.startsWith('removeReward_')) {
       const execMember = await itx.guild.members.fetch(itx.user.id)
       if (!isAdmin(execMember)) return itx.reply({ content: 'You lack permission.', ephemeral: true })
@@ -514,11 +579,11 @@ client.on('interactionCreate', async itx => {
   }
 })
 
-client.login(TOKEN)
-
+// Buttons for Clear All confirm
 client.on('interactionCreate', async (btn) => {
   try {
     if (!btn.isButton()) return
+
     if (btn.customId.startsWith('confirmClear_')) {
       const execMember = await btn.guild.members.fetch(btn.user.id)
       if (!isAdmin(execMember)) return btn.reply({ content: 'You lack permission.', ephemeral: true })
@@ -526,23 +591,28 @@ client.on('interactionCreate', async (btn) => {
       const removed = clearRewards(targetId)
       return btn.update({ content: removed ? `🧹 Cleared **${removed}** rewards.` : 'No active rewards to clear.', components: [] })
     }
+
     if (btn.customId.startsWith('cancelClear_')) {
       return btn.update({ content: '❌ Action cancelled.', components: [] })
     }
+
     if (btn.customId.startsWith('clearRewards_')) {
       const execMember = await btn.guild.members.fetch(btn.user.id)
       if (!isAdmin(execMember)) return btn.reply({ content: 'You lack permission.', ephemeral: true })
 
       const targetId = btn.customId.split('_')[1]
       const targetUser = await btn.client.users.fetch(targetId)
+
       const confirmBtn = new ButtonBuilder()
         .setCustomId(`confirmClear_${targetId}`)
         .setLabel('✅ Confirm')
         .setStyle(ButtonStyle.Danger)
+
       const cancelBtn = new ButtonBuilder()
         .setCustomId(`cancelClear_${targetId}`)
         .setLabel('❌ Cancel')
         .setStyle(ButtonStyle.Secondary)
+
       const row = new ActionRowBuilder().addComponents(confirmBtn, cancelBtn)
       return btn.reply({ content: `Are you sure you want to clear all rewards for ${targetUser}?`, components: [row], ephemeral: true })
     }
@@ -551,3 +621,9 @@ client.on('interactionCreate', async (btn) => {
     if (btn.isRepliable()) btn.reply({ content: 'Something went wrong.', ephemeral: true }).catch(() => {})
   }
 })
+
+client.login(TOKEN)
+
+// Safety: don’t die on random promise errors
+process.on('unhandledRejection', err => console.error('UnhandledRejection:', err))
+process.on('uncaughtException', err => console.error('UncaughtException:', err))
