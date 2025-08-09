@@ -78,7 +78,6 @@ const KITS = [
   { name: 'Survival Kit', description: "Matches, canteen, rope, tarp." },
 ]
 
-# (truncated in the interest of space in Python; we'll append the rest below)
 
 // ---- Helpers ----
 function pickWeighted(bag) {
